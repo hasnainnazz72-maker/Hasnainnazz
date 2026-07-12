@@ -385,11 +385,8 @@ function validateAndProcessAccounts(incomingAccounts: any[], currentAccounts: an
   if (isAdmin) {
     // Admin has full control, update existing or insert new ones.
     // If a user is not present in incomingAccounts, it was manually deleted by the admin.
-    const incomingUsernames = new Set(incomingAccounts.map(a => a.username.toLowerCase()));
-    if (incomingAccounts.length > 0) {
-      resultAccounts = resultAccounts.filter(a => incomingUsernames.has(a.username.toLowerCase()));
-    }
-
+    
+for (const incomingAcc of incomingAccounts) {
     for (const incomingAcc of incomingAccounts) {
       const idx = resultAccounts.findIndex(a => a.username.toLowerCase() === incomingAcc.username.toLowerCase());
       const v = incomingAcc.vipLevel !== undefined ? Number(incomingAcc.vipLevel) : (incomingAcc.vip !== undefined ? Number(incomingAcc.vip) : 1);
