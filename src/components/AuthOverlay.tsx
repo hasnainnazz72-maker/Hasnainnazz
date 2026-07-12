@@ -335,10 +335,17 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
 
     try {
       // Securely fetch details matching the typed Account ID or phone to login
-      const response = await fetch(`/api/accounts?username=${encodeURIComponent(loginUser.trim())}`);
-      const serverAccounts = await response.json();
+      const response = await fetch('/api/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    username: loginUser.trim(),
+    password: loginPass.trim()
+  })
+});
+      const data = await response.json();
 
-      if (Array.isArray(serverAccounts)) {
+      if (data.success) {
         // Merge with local accounts list to preserve other states
         const localAccounts = getAccounts();
         const merged = [...serverAccounts];
@@ -372,10 +379,10 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
         }
 
         // Success! Log the user in
-        localStorage.setItem('latigo_logged_in_user', found.username);
-        onLoginSuccess(found.username);
+        localStorage.setItem('latigo_logged_in_user', data.user.username);
+        onLoginSuccess(data.user.username);
       } else {
-        setLoginError('Could not contact authentication server. Please try again.');
+        setLoginError(data.error || 'Invalid username or password.');
         generateCaptcha();
       }
     } catch (err) {
