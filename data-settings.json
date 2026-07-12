@@ -1,0 +1,39 @@
+{
+  "siteName": "Latigo Music",
+  "logoEmoji": "🎵",
+  "logoText": "LATIGO MUSIC",
+  "supportTelegram": "https://t.me/latigo_music_official",
+  "supportWhatsApp": "+1234567890",
+  "minWithdrawal": 15,
+  "welfareReward": 0.10,
+  "registrationBonus": 0,
+  "trc20Address": "TETttTRj6ZX5gAm79RgDgDm6WHeMrnDjdy",
+  "bep20Address": "0xbd63907b714a667f5052c432cdc4ad3dc0d73658",
+  "banners": [
+    {
+      "title": "LATIGO MUSIC GLOBAL LAUNCH",
+      "desc": "Invest in music streaming tickets & earn secure compound daily profit!",
+      "bonus": "RECHARGE $310 GET $60 FREE REWARD INSTANTLY",
+      "accent": "from-emerald-600 via-teal-900 to-black"
+    },
+    {
+      "title": "VIP UPGRADE WELFARE INCENTIVE",
+      "desc": "Unlock VIP2/VIP3 to compound your daily income up to 3.5% ROI",
+      "bonus": "INVITE 3 FRIENDS TO UPGRADE VIP & RECEIVE TRC-20 BONUS",
+      "accent": "from-purple-900 via-indigo-950 to-black"
+    }
+  ],
+  "announcements": [
+    "Congratulations to a8m*** vip1, completed 20 tasks, earnings $10.40",
+    "Congratulations to m777*** vip2, completed 30 tasks, earnings $135.00",
+    "Congratulations to s9p*** vip3, completed 40 tasks, earnings $640.20",
+    "Congratulations to u2k*** vip4, completed 50 tasks, earnings $1,420.50",
+    "Withdrawal of $340.00 successful via USDT-TRC20 for member k2***"
+  ],
+  "commissions": {
+    "level1": 10,
+    "level2": 5,
+    "level3": 2
+  },
+  "publicUrl": "https://h5latigo-music.ai.studio"
+}

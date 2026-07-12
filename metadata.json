@@ -1,0 +1,6 @@
+{
+  "name": "Latigo Music",
+  "description": "An interactive music ticket compound yield simulation platform where users can upgrade VIP levels, buy music tickets for daily returns, build their team to earn multi-level commissions, and manage virtual funds.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

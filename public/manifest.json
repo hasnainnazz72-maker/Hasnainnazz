@@ -1,0 +1,37 @@
+{
+  "name": "Latigo Music",
+  "short_name": "Latigo Music",
+  "description": "Official Latigo Music - Listen to Music & Earn Daily Rewards",
+  "start_url": "/",
+  "id": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#10b981",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
