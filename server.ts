@@ -4,11 +4,39 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+// Security headers: mitigates clickjacking, MIME-sniffing, and other issues
+// that browser "Dangerous site" / Safe Browsing heuristics look for.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        // Vite dev/build output and inline Tailwind styles need these; no
+        // third-party script/style hosts are used anywhere in this app.
+        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:", "https://images.unsplash.com"],
+        fontSrc: ["'self'", "data:"],
+        connectSrc: ["'self'", "ws:", "wss:"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'self'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    // HSTS only makes sense once the site is consistently served over HTTPS
+    // (true for Replit's production domains); harmless no-op otherwise.
+    hsts: { maxAge: 15552000, includeSubDomains: true },
+    crossOriginEmbedderPolicy: false,
+  })
+);
 
 app.use(express.json());
 
@@ -363,13 +391,11 @@ function validateAndProcessAccounts(incomingAccounts: any[], currentAccounts: an
   let resultAccounts = [...currentAccounts];
 
   if (isAdmin) {
-    // Admin has full control, update existing or insert new ones.
-    // If a user is not present in incomingAccounts, it was manually deleted by the admin.
-    const incomingUsernames = new Set(incomingAccounts.map(a => a.username.toLowerCase()));
-    if (incomingAccounts.length > 0) {
-      resultAccounts = resultAccounts.filter(a => incomingUsernames.has(a.username.toLowerCase()));
-    }
-
+    // Admin has full control to update existing accounts or insert new ones.
+    // IMPORTANT: we never delete an account just because it's missing from an
+    // incoming bulk-sync payload (e.g. a stale/partial admin panel snapshot).
+    // Deletion must go through the explicit DELETE /api/accounts/:username route
+    // so users can never silently disappear on refresh, restart, or a routine sync.
     for (const incomingAcc of incomingAccounts) {
       const idx = resultAccounts.findIndex(a => a.username.toLowerCase() === incomingAcc.username.toLowerCase());
       const v = incomingAcc.vipLevel !== undefined ? Number(incomingAcc.vipLevel) : (incomingAcc.vip !== undefined ? Number(incomingAcc.vip) : 1);
@@ -596,6 +622,24 @@ app.post('/api/accounts', (req, res) => {
   } catch (error) {
     console.error("Failed to process accounts saving:", error);
     res.status(500).json({ error: "Failed to save accounts database" });
+  }
+});
+
+// Explicit, targeted account deletion. This is the ONLY way an account is
+// ever removed from the database — bulk admin syncs never delete by omission.
+app.delete('/api/accounts/:username', (req, res) => {
+  try {
+    const username = String(req.params.username).toLowerCase();
+    const currentAccounts = getAccounts();
+    const remaining = currentAccounts.filter((a: any) => a.username.toLowerCase() !== username);
+    if (remaining.length === currentAccounts.length) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+    saveAccounts(remaining);
+    res.json({ success: true, count: remaining.length });
+  } catch (error) {
+    console.error("Failed to delete account:", error);
+    res.status(500).json({ error: "Failed to delete account" });
   }
 });
 

@@ -421,6 +421,11 @@ export default function AdminPanel({
     setRegisteredAccounts(updated);
     localStorage.setItem('latigo_accounts', JSON.stringify(updated));
 
+    // Explicitly delete on the server too — bulk sync never deletes by omission,
+    // so this targeted request is the only way the account is removed server-side.
+    fetch(`/api/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' })
+      .catch(err => console.error('Failed to delete account on server', err));
+
     logActivity(`Admin manually deleted user account permanently: ${username}`);
     alert(`Account "${username}" was permanently deleted.`);
     setSelectedUser(null);
