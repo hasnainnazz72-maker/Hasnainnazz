@@ -7,6 +7,8 @@ import dotenv from 'dotenv';
 import helmet from 'helmet';
 dotenv.config();
 
+const app = express();
+const PORT = 3000;
 app.use(
   helmet({
     contentSecurityPolicy: {
