@@ -606,7 +606,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
 
         {/* Educational Simulation Disclosure Box */}
         <div className="mt-4 p-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl text-[10px] text-zinc-400 leading-normal relative z-10 max-h-[100px] overflow-y-auto">
-          <span className="text-amber-500 font-extrabold uppercase">⚠️ Educational Simulation:</span> Latigo Music is a gamified virtual simulation platform. All transaction logs, VIP tiers, and balance claims are 100% simulated play credits for educational fun only. No real fiat money, investments, or actual cryptocurrencies are used, accepted, or stored.
+          
         </div>
 
         {/* Body Views */}
