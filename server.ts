@@ -10,6 +10,30 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 
+const app = express();
+const PORT = 3000;
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:", "https://images.unsplash.com"],
+        fontSrc: ["'self'", "data:"],
+        connectSrc: ["'self'", "ws:", "wss:"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'self'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    hsts: { maxAge: 15552000, includeSubDomains: true },
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
 app.use(express.json());
 
 const SETTINGS_FILE = path.join(process.cwd(), 'data-settings.json');
