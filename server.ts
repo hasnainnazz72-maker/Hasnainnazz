@@ -323,7 +323,26 @@ app.post('/api/settings', (req, res) => {
     res.status(500).json({ error: "Failed to save site settings" });
   }
 });
+app.post('/api/login', (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const accounts = getAccounts();
 
+    const user = accounts.find((a: any) =>
+      (a.username.toLowerCase() === String(username).toLowerCase() ||
+      a.phone === username) &&
+      a.password === password
+    );
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid username or password" });
+    }
+
+    res.json({ success: true, user });
+  } catch (error) {
+    res.status(500).json({ error: "Login failed" });
+  }
+});
 app.get('/api/accounts', (req, res) => {
   try {
     const accounts = getAccounts();
