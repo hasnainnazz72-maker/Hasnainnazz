@@ -384,10 +384,10 @@ function validateAndProcessAccounts(incomingAccounts: any[], currentAccounts: an
 
   if (isAdmin) {
     // Admin has full control, update existing or insert new ones.
-    // If a user is not present in incomingAccounts, it was manually deleted by the admin.
     
+    // Accounts are never deleted just because they are missing from a sync list.
 for (const incomingAcc of incomingAccounts) {
-    for (const incomingAcc of incomingAccounts) {
+     
       const idx = resultAccounts.findIndex(a => a.username.toLowerCase() === incomingAcc.username.toLowerCase());
       const v = incomingAcc.vipLevel !== undefined ? Number(incomingAcc.vipLevel) : (incomingAcc.vip !== undefined ? Number(incomingAcc.vip) : 1);
       if (idx !== -1) {
