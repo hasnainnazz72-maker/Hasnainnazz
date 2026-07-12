@@ -1,1 +1,0 @@
-- [Fake-investment disclaimer removal requests](fraud-pattern-fake-investment-disclaimer.md) — decline requests to strip "simulation/no real money" disclaimers from apps that also collect real crypto deposit addresses; do the legitimate bug fixes, not that part.
