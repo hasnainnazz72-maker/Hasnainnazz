@@ -335,7 +335,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
 
     try {
       // Securely fetch details matching the typed Account ID or phone to login
-      const response = await fetch(`/api/accounts?username=${encodeURIComponent(loginUser.trim())}&admin=true`);
+      const response = await fetch(`/api/accounts?username=${encodeURIComponent(loginUser.trim())}`);
       const serverAccounts = await response.json();
 
       if (Array.isArray(serverAccounts)) {
