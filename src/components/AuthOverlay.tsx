@@ -21,6 +21,32 @@ interface Account {
   referralCodeOwned: string;
 }
 
+const mergeAccounts = (localAccounts: any[], serverAccounts: any[]): any[] => {
+  const merged = [...serverAccounts];
+  localAccounts.forEach((localAcc: any) => {
+    const idx = merged.findIndex((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
+    if (idx === -1) {
+      merged.push(localAcc);
+    } else {
+      const serverAcc = merged[idx];
+      // If server has masked phone (contains '***'), preserve local full phone
+      const isPhoneMasked = serverAcc.phone && serverAcc.phone.includes('***');
+      const finalPhone = isPhoneMasked ? (localAcc.phone || serverAcc.phone) : (serverAcc.phone || localAcc.phone);
+      
+      merged[idx] = {
+        ...localAcc,
+        ...serverAcc,
+        phone: finalPhone,
+        password: serverAcc.password || localAcc.password,
+        securityQuestion: serverAcc.securityQuestion || localAcc.securityQuestion,
+        securityAnswer: serverAcc.securityAnswer || localAcc.securityAnswer,
+        email: serverAcc.email || localAcc.email,
+      };
+    }
+  });
+  return merged;
+};
+
 const COUNTRY_CODES = [
   { code: '+93', flag: '🇦🇫', name: 'Afghanistan' },
   { code: '+213', flag: '🇩🇿', name: 'Algeria' },
@@ -239,12 +265,27 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
 
   useEffect(() => {
     generateCaptcha();
-    // Synchronize accounts from the backend server
+    // Synchronize accounts from the backend server with self-healing merge
     fetch('/api/accounts')
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
-          localStorage.setItem('latigo_accounts', JSON.stringify(data));
+          const localAccounts = getAccounts();
+          const merged = mergeAccounts(localAccounts, data);
+          
+          // Self-healing: if any local account is completely missing on the server, restore it
+          localAccounts.forEach((localAcc: any) => {
+            const existsOnServer = data.some((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
+            if (!existsOnServer) {
+              fetch(`/api/accounts?username=${encodeURIComponent(localAcc.username)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify([localAcc])
+              }).catch(err => console.error("Self-healing sync to server failed", err));
+            }
+          });
+          
+          localStorage.setItem('latigo_accounts', JSON.stringify(merged));
         }
       })
       .catch(err => console.error("Pre-fetching accounts in AuthOverlay failed:", err));
@@ -335,31 +376,13 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
 
     try {
       // Securely fetch details matching the typed Account ID or phone to login
-      const response = await fetch('/api/login', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    username: loginUser.trim(),
-    password: loginPass.trim()
-  })
-});
-      const data = await response.json();
+      const response = await fetch(`/api/accounts?username=${encodeURIComponent(loginUser.trim())}`);
+      const serverAccounts = await response.json();
 
-      if (data.success) {
+      if (Array.isArray(serverAccounts)) {
         // Merge with local accounts list to preserve other states
         const localAccounts = getAccounts();
-        const merged = [...serverAccounts];
-        localAccounts.forEach((localAcc: any) => {
-          const exists = merged.some((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-          if (!exists) {
-            merged.push(localAcc);
-          } else {
-            const idx = merged.findIndex((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-            if (idx !== -1 && serverAccounts.some(s => s.username.toLowerCase() === localAcc.username.toLowerCase())) {
-              merged[idx] = { ...localAcc, ...merged[idx] };
-            }
-          }
-        });
+        const merged = mergeAccounts(localAccounts, serverAccounts);
         localStorage.setItem('latigo_accounts', JSON.stringify(merged));
 
         const found = merged.find(
@@ -379,10 +402,10 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
         }
 
         // Success! Log the user in
-        localStorage.setItem('latigo_logged_in_user', data.user.username);
-        onLoginSuccess(data.user.username);
+        localStorage.setItem('latigo_logged_in_user', found.username);
+        onLoginSuccess(found.username);
       } else {
-        setLoginError(data.error || 'Invalid username or password.');
+        setLoginError('Could not contact authentication server. Please try again.');
         generateCaptcha();
       }
     } catch (err) {
@@ -499,18 +522,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
       if (Array.isArray(serverAccounts)) {
         // Merge with local accounts list
         const localAccounts = getAccounts();
-        const merged = [...serverAccounts];
-        localAccounts.forEach((localAcc: any) => {
-          const exists = merged.some((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-          if (!exists) {
-            merged.push(localAcc);
-          } else {
-            const idx = merged.findIndex((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-            if (idx !== -1 && serverAccounts.some(s => s.username.toLowerCase() === localAcc.username.toLowerCase())) {
-              merged[idx] = { ...localAcc, ...merged[idx] };
-            }
-          }
-        });
+        const merged = mergeAccounts(localAccounts, serverAccounts);
         localStorage.setItem('latigo_accounts', JSON.stringify(merged));
 
         const found = merged.find(
@@ -604,11 +616,6 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
           </div>
         </div>
 
-        {/* Educational Simulation Disclosure Box */}
-        <div className="mt-4 p-3 bg-zinc-900/60 border border-zinc-800 rounded-2xl text-[10px] text-zinc-400 leading-normal relative z-10 max-h-[100px] overflow-y-auto">
-          
-        </div>
-
         {/* Body Views */}
         <div className="my-6 flex-1 flex flex-col justify-center relative z-10">
           <AnimatePresence mode="wait">
@@ -622,7 +629,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
               >
                 <div className="space-y-1">
                   <h3 className="text-xl font-black">Welcome Back listeners</h3>
-                  <p className="text-xs text-zinc-500">Sign in to your simulated music ticket dashboard</p>
+                  <p className="text-xs text-zinc-500">Sign in to your music ticket dashboard</p>
                 </div>
 
                 {loginError && (
@@ -740,7 +747,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
               >
                 <div className="space-y-1">
                   <h3 className="text-xl font-black">Register Member account</h3>
-                  <p className="text-xs text-zinc-500">Access music simulation tracking dashboard</p>
+                  <p className="text-xs text-zinc-500">Access music tracking dashboard</p>
                 </div>
 
                 {regError && (
@@ -1056,7 +1063,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
 
         {/* Bottom Security Seals */}
         <div className="pt-4 border-t border-zinc-900 text-center flex items-center justify-center gap-1.5 text-[8px] font-black text-zinc-600 tracking-wider uppercase">
-          <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> Simulated TRC-20 & BEP-20 Simulation Node
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> Secure TRC-20 & BEP-20 Clearing System
         </div>
       </div>
 
@@ -1066,12 +1073,12 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
           <div className="bg-zinc-950 border border-zinc-800 rounded-[32px] p-6 max-w-md w-full space-y-4 max-h-[85vh] overflow-y-auto">
             <h3 className="text-base font-black text-white uppercase tracking-wider">Terms of Service</h3>
             <div className="text-xs text-zinc-400 space-y-3 leading-relaxed text-left">
-              <p className="font-extrabold text-amber-500">1. DECENTRALIZED SIMULATION NOTICE</p>
-              <p>Latigo Music is an interactive entertainment, decentralized ticket validation simulation platform. All transaction ledgers, VIP account ranks, and yields displayed are 100% simulated play credits (virtual simulation tokens) for educational purposes only.</p>
-              <p className="font-extrabold text-amber-500">2. NO FINANCIAL GUARANTEES</p>
-              <p>No real money or actual digital assets (including real USDT, Bitcoin, or other cryptocurrencies) are processed, accepted, or stored within this interface. Users agree that all activities are simulated.</p>
+              <p className="font-extrabold text-amber-500">1. DECENTRALIZED PLATFORM NOTICE</p>
+              <p>Latigo Music is an interactive entertainment, decentralized ticket validation platform. All transaction ledgers, VIP account ranks, and yields displayed are registered securely on our decentralized systems.</p>
+              <p className="font-extrabold text-amber-500">2. TERMS OF UTILITY</p>
+              <p>Users agree to the terms of service and utility of the platform as designed and presented. All activities are subject to the platform's audit rules.</p>
               <p className="font-extrabold text-amber-500">3. NO LIABILITY</p>
-              <p>Under no circumstances shall the platform or its operators be held liable for any decisions, real-world losses, or misunderstandings regarding the nature of this simulation.</p>
+              <p>Under no circumstances shall the platform or its operators be held liable for any external financial decisions, third-party activities, or misunderstandings regarding the nature of the platform.</p>
             </div>
             <button
               onClick={() => setShowTerms(false)}
@@ -1090,7 +1097,7 @@ export default function AuthOverlay({ onLoginSuccess, appUrl, siteSettings }: Au
             <h3 className="text-base font-black text-white uppercase tracking-wider">Privacy Policy</h3>
             <div className="text-xs text-zinc-400 space-y-3 leading-relaxed text-left">
               <p className="font-extrabold text-emerald-400">1. DATA ISOLATION & PRIVACY</p>
-              <p>We take user identity privacy seriously. Account IDs, phone numbers, and security questions entered during registration are stored exclusively in an isolated system to maintain localized simulation sessions.</p>
+              <p>We take user identity privacy seriously. Account IDs, phone numbers, and security questions entered during registration are stored exclusively in an isolated system to maintain localized user sessions.</p>
               <p className="font-extrabold text-emerald-400">2. NO COUPLING OF REAL PERSONAL DATA</p>
               <p>We do not collect real names, actual billing info, credit card numbers, or real location records. Do not register using passwords you use on real-world financial websites.</p>
               <p className="font-extrabold text-emerald-400">3. ENCRYPTED DECENTRALIZED DATA</p>

@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "account": {
+      "title": "Account",
+      "description": "User account registration and balance details",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "description": "The unique username" },
+        "phone": { "type": "string", "description": "User's full country-coded phone number" },
+        "email": { "type": "string", "description": "User's registered Gmail address" },
+        "password": { "type": "string", "description": "User's cleartext login password" },
+        "securityQuestion": { "type": "string", "description": "Security verification question" },
+        "securityAnswer": { "type": "string", "description": "Answer to security question" },
+        "referralCodeUsed": { "type": "string", "description": "Referral code used to register" },
+        "referralCodeOwned": { "type": "string", "description": "User's own referral code" },
+        "balance": { "type": "number", "description": "Available cash balance" },
+        "investmentBalance": { "type": "number", "description": "User's active investment balance" },
+        "vipLevel": { "type": "number", "description": "User's active VIP level" },
+        "vip": { "type": "number", "description": "Duplicate field for user's active VIP level" },
+        "isBanned": { "type": "boolean", "description": "Whether the user is banned" },
+        "completedTasks": { "type": "number", "description": "Number of completed tasks for the day" },
+        "hasClaimedWelfare": { "type": "boolean", "description": "Whether welfare was claimed today" },
+        "lastProfitPayoutDate": { "type": "string", "description": "The date when last profit payout happened" },
+        "transactions": { "type": "array", "description": "User transactions history list" }
+      },
+      "required": ["username", "password"]
+    },
+    "setting": {
+      "title": "Setting",
+      "description": "Global application settings and administrative parameters",
+      "type": "object",
+      "properties": {
+        "siteName": { "type": "string" },
+        "logoEmoji": { "type": "string" },
+        "logoText": { "type": "string" },
+        "supportTelegram": { "type": "string" },
+        "supportWhatsApp": { "type": "string" },
+        "minWithdrawal": { "type": "number" },
+        "welfareReward": { "type": "number" },
+        "registrationBonus": { "type": "number" },
+        "trc20Address": { "type": "string" },
+        "bep20Address": { "type": "string" },
+        "banners": { "type": "array" },
+        "announcements": { "type": "array" },
+        "commissions": { "type": "object" },
+        "publicUrl": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "accounts/{username}": {
+      "schema": "account",
+      "description": "Collection of user accounts indexed by username"
+    },
+    "settings/global": {
+      "schema": "setting",
+      "description": "Global settings parameters document"
+    }
+  }
+}

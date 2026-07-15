@@ -12,6 +12,142 @@ import MusicPlayerModal from './components/MusicPlayerModal';
 import AdminPanel from './components/AdminPanel';
 import AuthOverlay from './components/AuthOverlay';
 
+const getLocalUserField = (field: string, defaultValue: any) => {
+  const loggedUser = typeof window !== 'undefined' ? localStorage.getItem('latigo_logged_in_user') || '' : '';
+  if (!loggedUser) return defaultValue;
+  const accountsData = typeof window !== 'undefined' ? localStorage.getItem('latigo_accounts') : null;
+  if (accountsData) {
+    try {
+      const accounts = JSON.parse(accountsData);
+      const user = accounts.find((a: any) => a.username.toLowerCase() === loggedUser.toLowerCase());
+      if (user && user[field] !== undefined) {
+        return user[field];
+      }
+    } catch (e) {}
+  }
+  // Fallback to old individual keys if exists
+  if (typeof window !== 'undefined') {
+    if (field === 'balance') {
+      const saved = localStorage.getItem('latigo_balance');
+      return saved ? Number(saved) : defaultValue;
+    }
+    if (field === 'investmentBalance') {
+      const saved = localStorage.getItem('latigo_investment_balance');
+      return saved ? Number(saved) : defaultValue;
+    }
+    if (field === 'vipLevel') {
+      const saved = localStorage.getItem('latigo_vip');
+      return saved ? Number(saved) : defaultValue;
+    }
+    if (field === 'completedTasks') {
+      const saved = localStorage.getItem('latigo_tasks_completed');
+      return saved ? Number(saved) : defaultValue;
+    }
+    if (field === 'hasClaimedWelfare') {
+      const saved = localStorage.getItem('latigo_welfare_claimed');
+      return saved === 'true' ? true : defaultValue;
+    }
+    if (field === 'lastProfitPayoutDate') {
+      return localStorage.getItem('latigo_last_profit_payout') || defaultValue;
+    }
+    if (field === 'transactions') {
+      const saved = localStorage.getItem('latigo_transactions');
+      if (saved) {
+        try { return JSON.parse(saved); } catch (e) {}
+      }
+    }
+  }
+  return defaultValue;
+};
+
+const mergeTransactions = (localTxs: any[] = [], serverTxs: any[] = []) => {
+  const mergedMap = new Map();
+  
+  // First, add all local transactions
+  localTxs.forEach(tx => {
+    mergedMap.set(tx.id, { ...tx });
+  });
+  
+  // Then, merge server transactions
+  serverTxs.forEach(serverTx => {
+    const localTx = mergedMap.get(serverTx.id);
+    if (!localTx) {
+      // New transaction from server (e.g. commission)
+      mergedMap.set(serverTx.id, { ...serverTx });
+    } else {
+      // Transaction exists in both.
+      // Rule: status 'passed' or 'cancelled' ALWAYS wins over 'pending'
+      let finalStatus = localTx.status;
+      if (serverTx.status === 'passed' || serverTx.status === 'cancelled') {
+        finalStatus = serverTx.status;
+      } else if (localTx.status === 'passed' || localTx.status === 'cancelled') {
+        finalStatus = localTx.status;
+      }
+      
+      mergedMap.set(serverTx.id, {
+        ...localTx,
+        ...serverTx,
+        status: finalStatus
+      });
+    }
+  });
+  
+  return Array.from(mergedMap.values());
+};
+
+const mergeAccounts = (
+  localAccounts: any[], 
+  serverAccounts: any[], 
+  loggedInUser: string = '', 
+  lastLocalMutationTime: number = 0
+): any[] => {
+  const merged = [...serverAccounts];
+  localAccounts.forEach((localAcc: any) => {
+    const idx = merged.findIndex((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
+    if (idx === -1) {
+      merged.push(localAcc);
+    } else {
+      const serverAcc = merged[idx];
+      // If server has masked phone (contains '***'), preserve local full phone
+      const isPhoneMasked = serverAcc.phone && serverAcc.phone.includes('***');
+      const finalPhone = isPhoneMasked ? (localAcc.phone || serverAcc.phone) : (serverAcc.phone || localAcc.phone);
+      
+      const isMutationLocked = loggedInUser && 
+        localAcc.username.toLowerCase() === loggedInUser.toLowerCase() && 
+        (Date.now() - lastLocalMutationTime < 4000);
+        
+      const mergedTxs = mergeTransactions(localAcc.transactions || [], serverAcc.transactions || []);
+      
+      merged[idx] = {
+        ...localAcc,
+        ...serverAcc,
+        phone: finalPhone,
+        password: serverAcc.password || localAcc.password,
+        securityQuestion: serverAcc.securityQuestion || localAcc.securityQuestion,
+        securityAnswer: serverAcc.securityAnswer || localAcc.securityAnswer,
+        email: serverAcc.email || localAcc.email,
+        transactions: mergedTxs
+      };
+
+      if (isMutationLocked) {
+        // Keep local balance and investmentBalance during mutation lock
+        merged[idx].balance = localAcc.balance;
+        merged[idx].investmentBalance = localAcc.investmentBalance;
+      } else {
+        if (typeof serverAcc.balance === 'number') merged[idx].balance = serverAcc.balance;
+        if (typeof serverAcc.investmentBalance === 'number') {
+          merged[idx].investmentBalance = serverAcc.investmentBalance;
+        } else if (typeof serverAcc.balance === 'number') {
+          merged[idx].investmentBalance = serverAcc.balance;
+        }
+      }
+    }
+  });
+  return merged;
+};
+
+let syncTimeoutId: any = null;
+
 export default function App() {
   const [loggedInUser, setLoggedInUser] = useState<string>(() => {
     return localStorage.getItem('latigo_logged_in_user') || '';
@@ -27,13 +163,11 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<'home' | 'income' | 'task' | 'finance' | 'mine'>('home');
   const [userBalance, setUserBalance] = useState<number>(() => {
-    const saved = localStorage.getItem('latigo_balance');
-    return saved ? Number(saved) : 0.00; // Registration sign-up welfare removed
+    return getLocalUserField('balance', 0.00);
   });
   
   const [userInvestmentBalance, setUserInvestmentBalance] = useState<number>(() => {
-    const saved = localStorage.getItem('latigo_investment_balance');
-    return saved ? Number(saved) : 0.00;
+    return getLocalUserField('investmentBalance', 0.00);
   });
 
   // Keep investment balance in sync with available balance
@@ -43,22 +177,19 @@ export default function App() {
   }, [userBalance]);
   
   const [userVipLevel, setUserVipLevel] = useState<number>(() => {
-    const saved = localStorage.getItem('latigo_vip');
-    return saved ? Number(saved) : 1; // Default to VIP 1 so they can immediately buy some lower tier tickets and play!
+    return getLocalUserField('vipLevel', 1);
   });
 
   const [completedTasksCount, setCompletedTasksCount] = useState<number>(() => {
-    const saved = localStorage.getItem('latigo_tasks_completed');
-    return saved ? Number(saved) : 0;
+    return getLocalUserField('completedTasks', 0);
   });
 
   const [hasClaimedWelfareToday, setHasClaimedWelfareToday] = useState<boolean>(() => {
-    const saved = localStorage.getItem('latigo_welfare_claimed');
-    return saved === 'true';
+    return getLocalUserField('hasClaimedWelfare', false);
   });
 
   const [lastProfitPayoutDate, setLastProfitPayoutDate] = useState<string>(() => {
-    return localStorage.getItem('latigo_last_profit_payout') || '';
+    return getLocalUserField('lastProfitPayoutDate', '');
   });
 
   const [profitAlert, setProfitAlert] = useState<{ amount: number; rate: number } | null>(null);
@@ -253,7 +384,9 @@ export default function App() {
   ]);
 
   // Start with a clean slate of transactions for privacy and session safety
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>(() => {
+    return getLocalUserField('transactions', []);
+  });
 
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
 
@@ -373,18 +506,8 @@ export default function App() {
         if (Array.isArray(data)) {
           // Merge with local accounts list to prevent erasure of registered users during server restarts (self-healing)
           const localAccountsData = localStorage.getItem('latigo_accounts');
-          let merged = [...data];
-          if (localAccountsData) {
-            try {
-              const localAccounts = JSON.parse(localAccountsData);
-              localAccounts.forEach((localAcc: any) => {
-                const exists = merged.some((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-                if (!exists) {
-                  merged.push(localAcc);
-                }
-              });
-            } catch (e) {}
-          }
+          const localAccounts = localAccountsData ? JSON.parse(localAccountsData) : [];
+          const merged = mergeAccounts(localAccounts, data, loggedInUser, lastLocalMutationTime);
 
           // Self-healing / Restoration: if the logged-in user is missing from the server's list, restore their local account data to the server
           if (loggedInUser) {
@@ -404,16 +527,7 @@ export default function App() {
                     .then(res => res.json())
                     .then(freshData => {
                       if (Array.isArray(freshData)) {
-                        const freshMerged = [...freshData];
-                        if (localAccountsData) {
-                          try {
-                            const localAccs = JSON.parse(localAccountsData);
-                            localAccs.forEach((localAcc: any) => {
-                              const exists = freshMerged.some((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-                              if (!exists) freshMerged.push(localAcc);
-                            });
-                          } catch (e) {}
-                        }
+                        const freshMerged = mergeAccounts(localAccounts, freshData, loggedInUser, lastLocalMutationTime);
                         localStorage.setItem('latigo_accounts', JSON.stringify(freshMerged));
                       }
                     });
@@ -463,64 +577,10 @@ export default function App() {
       .catch(err => console.error("Sync accounts database on mount failed", err));
   }, [loggedInUser]);
 
-  // Save user-specific details back to latigo_accounts database
-  useEffect(() => {
-    if (!loggedInUser) return;
-    const data = localStorage.getItem('latigo_accounts');
-    if (data) {
-      try {
-        const accounts = JSON.parse(data);
-        const idx = accounts.findIndex((a: any) => a.username.toLowerCase() === loggedInUser.toLowerCase());
-        if (idx !== -1) {
-          let dirty = false;
-          if (accounts[idx].balance !== userBalance) {
-            accounts[idx].balance = userBalance;
-            dirty = true;
-          }
-          if (accounts[idx].investmentBalance !== userInvestmentBalance) {
-            accounts[idx].investmentBalance = userInvestmentBalance;
-            dirty = true;
-          }
-          if (accounts[idx].vipLevel !== userVipLevel) {
-            accounts[idx].vipLevel = userVipLevel;
-            dirty = true;
-          }
-          if (JSON.stringify(accounts[idx].transactions) !== JSON.stringify(transactions)) {
-            accounts[idx].transactions = transactions;
-            dirty = true;
-          }
-          if (accounts[idx].completedTasks !== completedTasksCount) {
-            accounts[idx].completedTasks = completedTasksCount;
-            dirty = true;
-          }
-          if (accounts[idx].hasClaimedWelfare !== hasClaimedWelfareToday) {
-            accounts[idx].hasClaimedWelfare = hasClaimedWelfareToday;
-            dirty = true;
-          }
-          if (accounts[idx].lastProfitPayoutDate !== lastProfitPayoutDate) {
-            accounts[idx].lastProfitPayoutDate = lastProfitPayoutDate;
-            dirty = true;
-          }
-          
-          if (dirty) {
-            localStorage.setItem('latigo_accounts', JSON.stringify(accounts));
-            const syncUrl = `/api/accounts?username=${encodeURIComponent(loggedInUser)}`;
-            fetch(syncUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(accounts)
-            }).catch(err => console.error("Sync accounts failed", err));
-          }
-        }
-      } catch (err) {
-        console.error("Error saving account state", err);
-      }
-    }
-  }, [loggedInUser, userBalance, userInvestmentBalance, userVipLevel, transactions, completedTasksCount, hasClaimedWelfareToday, lastProfitPayoutDate]);
-
   // Poll account details from server to reflect any admin adjustments, bans, or daily profit payouts immediately
   useEffect(() => {
     if (!loggedInUser) return;
+    if (isAdminView) return; // Prevent user-side polling from running and corrupting local storage in the admin panel
 
     const checkState = () => {
       fetch(`/api/accounts?username=${encodeURIComponent(loggedInUser)}`)
@@ -529,18 +589,8 @@ export default function App() {
           if (Array.isArray(data)) {
             // Merge with local accounts list to prevent erasing registered users during server restarts
             const localAccountsData = localStorage.getItem('latigo_accounts');
-            let merged = [...data];
-            if (localAccountsData) {
-              try {
-                const localAccounts = JSON.parse(localAccountsData);
-                localAccounts.forEach((localAcc: any) => {
-                  const exists = merged.some((m: any) => m.username.toLowerCase() === localAcc.username.toLowerCase());
-                  if (!exists) {
-                    merged.push(localAcc);
-                  }
-                });
-              } catch (e) {}
-            }
+            const localAccounts = localAccountsData ? JSON.parse(localAccountsData) : [];
+            const merged = mergeAccounts(localAccounts, data, loggedInUser, lastLocalMutationTime);
             localStorage.setItem('latigo_accounts', JSON.stringify(merged));
 
             const found = data.find((a: any) => a.username.toLowerCase() === loggedInUser.toLowerCase());
@@ -623,7 +673,11 @@ export default function App() {
             levelA.forEach((a: any) => {
               const recharges = a.transactions ? a.transactions.filter((t: any) => t.type === 'recharge' && t.status === 'passed') : [];
               const totalRechargeAmt = recharges.reduce((sum: number, r: any) => sum + r.amount, 0);
-              const commission = Number((totalRechargeAmt * 0.16).toFixed(4));
+              
+              const myTxs = loggedInAcc.transactions || [];
+              const commission = myTxs
+                .filter((t: any) => t.type === 'referral_commission' && t.status === 'passed' && t.description && t.description.toLowerCase().includes(`"${a.username.toLowerCase()}"`))
+                .reduce((sum: number, t: any) => sum + t.amount, 0);
 
               team.push({
                 id: `tm-${a.username}`,
@@ -641,7 +695,9 @@ export default function App() {
                 levelB.forEach((b: any) => {
                   const bRecharges = b.transactions ? b.transactions.filter((t: any) => t.type === 'recharge' && t.status === 'passed') : [];
                   const bTotalRechargeAmt = bRecharges.reduce((sum: number, r: any) => sum + r.amount, 0);
-                  const bCommission = Number((bTotalRechargeAmt * 0.08).toFixed(4));
+                  const bCommission = myTxs
+                    .filter((t: any) => t.type === 'referral_commission' && t.status === 'passed' && t.description && t.description.toLowerCase().includes(`"${b.username.toLowerCase()}"`))
+                    .reduce((sum: number, t: any) => sum + t.amount, 0);
 
                   team.push({
                     id: `tm-${b.username}`,
@@ -659,7 +715,9 @@ export default function App() {
                     levelC.forEach((c: any) => {
                       const cRecharges = c.transactions ? c.transactions.filter((t: any) => t.type === 'recharge' && t.status === 'passed') : [];
                       const cTotalRechargeAmt = cRecharges.reduce((sum: number, r: any) => sum + r.amount, 0);
-                      const cCommission = Number((cTotalRechargeAmt * 0.04).toFixed(4));
+                      const cCommission = myTxs
+                        .filter((t: any) => t.type === 'referral_commission' && t.status === 'passed' && t.description && t.description.toLowerCase().includes(`"${c.username.toLowerCase()}"`))
+                        .reduce((sum: number, t: any) => sum + t.amount, 0);
 
                       team.push({
                         id: `tm-${c.username}`,
@@ -694,8 +752,48 @@ export default function App() {
 
 
 
+  const mutateUserOnServer = async (action: string, payload: any) => {
+    if (!loggedInUser) return null;
+    try {
+      const res = await fetch('/api/accounts/mutate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loggedInUser, action, payload })
+      });
+      const data = await res.json();
+      if (data && data.success && data.user) {
+        // Explicitly update React states with server's returned data!
+        const user = data.user;
+        setUserBalance(user.balance);
+        setUserInvestmentBalance(user.investmentBalance !== undefined ? user.investmentBalance : user.balance);
+        setUserVipLevel(user.vipLevel);
+        setTransactions(user.transactions || []);
+        setCompletedTasksCount(user.completedTasks || 0);
+        setLastProfitPayoutDate(user.lastProfitPayoutDate || '');
+        setHasClaimedWelfareToday(user.hasClaimedWelfare || false);
+        
+        // Also update local storage cache immediately
+        const localAccountsData = localStorage.getItem('latigo_accounts');
+        const localAccounts = localAccountsData ? JSON.parse(localAccountsData) : [];
+        const idx = localAccounts.findIndex((a: any) => a.username.toLowerCase() === loggedInUser.toLowerCase());
+        if (idx !== -1) {
+          localAccounts[idx] = user;
+          localStorage.setItem('latigo_accounts', JSON.stringify(localAccounts));
+        }
+        return user;
+      } else {
+        if (data && data.error) alert(`⚠️ Action failed: ${data.error}`);
+        return null;
+      }
+    } catch (err) {
+      console.error("Mutation failed:", err);
+      alert("⚠️ Network connection failed. Please retry.");
+      return null;
+    }
+  };
+
   // Handles daily tasks completion (buying tickets)
-  const handleCompleteTask = (earnings: number, songTitle: string) => {
+  const handleCompleteTask = async (earnings: number, songTitle: string) => {
     // A user must have at least VIP 1 activated before becoming eligible for daily earnings.
     if (userVipLevel < 1) {
       alert("You must have at least VIP 1 active to receive daily earnings!");
@@ -707,60 +805,25 @@ export default function App() {
       return;
     }
 
-    const todayStr = new Date().toISOString().substring(0, 10);
     if (completedTasksCount >= dailyTasksLimit) {
       alert("You have reached your daily ticket limit! Wait for Reset or upgrade your VIP level.");
       return;
     }
 
-    const updatedBalance = userBalance + earnings;
-    setUserBalance(updatedBalance);
-    setCompletedTasksCount(prev => prev + 1);
-    setLastProfitPayoutDate(todayStr);
-    setLastLocalMutationTime(Date.now());
-
-    const now = new Date();
-    const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
-
-    const newTx: Transaction = {
-      id: `TX-TICKET-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
-      type: 'task_commission',
-      amount: earnings,
-      status: 'passed',
-      timestamp: timeStr,
-      description: `Settled music ticket verification: "${songTitle}"`
-    };
-
-    setTransactions(prev => [newTx, ...prev]);
+    await mutateUserOnServer('complete_task', { earnings, songTitle });
   };
 
   // Upgrades VIP tier
-  const handleUpgradeVip = (level: number, cost: number) => {
+  const handleUpgradeVip = async (level: number, cost: number) => {
     if (userBalance < cost) {
       alert("Insufficient available balance to complete this VIP upgrade! Please recharge first.");
       return;
     }
 
-    const updatedBalance = userBalance - cost;
-    setUserBalance(updatedBalance);
-    setUserVipLevel(level);
-    setCompletedTasksCount(0); // Reset daily tasks count upon upgrading!
-    setLastLocalMutationTime(Date.now());
-
-    const now = new Date();
-    const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
-
-    const newTx: Transaction = {
-      id: `TX-UPGRADE-V${level}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
-      type: 'vip_upgrade',
-      amount: cost,
-      status: 'passed',
-      timestamp: timeStr,
-      description: `Upgraded membership status to elite VIP ${level}`
-    };
-
-    setTransactions(prev => [newTx, ...prev]);
-    alert(`Success! You have officially upgraded to VIP ${level}. Enjoy up to ${(vipLevels.find(v => v.level === level)?.dailyRate || 0) * 100}% daily ROI!`);
+    const updated = await mutateUserOnServer('upgrade_vip', { level, cost });
+    if (updated) {
+      alert(`Success! You have officially upgraded to VIP ${level}. Enjoy up to ${(vipLevels.find(v => v.level === level)?.dailyRate || 0) * 100}% daily ROI!`);
+    }
   };
 
   // Admin / simulator trigger: Add simulated registration
@@ -785,14 +848,10 @@ export default function App() {
     setTeamMembers(prev => [newMember, ...prev]);
 
     if (earnedCommission > 0) {
-      // Award user with instant referral bonus!
-      const updatedBalance = userBalance + earnedCommission;
-      setUserBalance(updatedBalance);
-
       const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
       const commissionTx: Transaction = {
-        id: `TX-REF-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
-        type: 'referral_commission',
+        id: `TX-COMM-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
+        type: 'task_commission', // Type needs to match Transaction type structure
         amount: earnedCommission,
         status: 'passed',
         timestamp: timeStr,
@@ -800,69 +859,25 @@ export default function App() {
       };
 
       setTransactions(prev => [commissionTx, ...prev]);
+      // Also update user balance via safe server mutate!
+      mutateUserOnServer('complete_task', { earnings: earnedCommission, songTitle: `Referral commission from ${username}` });
     }
   };
 
   // Claim Welfare Attendance Check-In
-  const handleClaimWelfare = (bonus: number) => {
+  const handleClaimWelfare = async (bonus: number) => {
     if (hasClaimedWelfareToday) return;
-
-    setUserBalance(prev => prev + bonus);
-    setHasClaimedWelfareToday(true);
-    setLastLocalMutationTime(Date.now());
-
-    const now = new Date();
-    const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
-
-    const welfareTx: Transaction = {
-      id: `TX-WELFARE-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
-      type: 'welfare_bonus',
-      amount: bonus,
-      status: 'passed',
-      timestamp: timeStr,
-      description: 'Daily welfare attendance sign-in award settled'
-    };
-
-    setTransactions(prev => [welfareTx, ...prev]);
+    await mutateUserOnServer('claim_welfare', { bonus });
   };
 
   // Handle virtual Recharge (USDT TRC20 code)
-  const handleRechargeSubmit = (amount: number, txId: string, receiptName?: string) => {
-    setLastLocalMutationTime(Date.now());
-    const now = new Date();
-    const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
-
-    const rechargeTx: Transaction = {
-      id: `R${Math.floor(1000000000 + Math.random() * 9000000000)}`,
-      type: 'recharge',
-      amount,
-      status: 'pending',
-      timestamp: timeStr,
-      description: `Recharge TRC-20 USDT deposit (TXID: ${txId.substring(0, 8)}...)${receiptName ? ` | Receipt: ${receiptName}` : ''}`,
-      txId
-    };
-
-    setTransactions(prev => [rechargeTx, ...prev]);
+  const handleRechargeSubmit = async (amount: number, txId: string, receiptName?: string) => {
+    await mutateUserOnServer('recharge_submit', { amount, txId, receiptName });
   };
 
   // Handle virtual Withdrawal order
-  const handleWithdrawSubmit = (amount: number, address: string) => {
-    setLastLocalMutationTime(Date.now());
-    const now = new Date();
-    const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
-
-    const withdrawTx: Transaction = {
-      id: `R${Math.floor(1000000000 + Math.random() * 9000000000)}`,
-      type: 'withdraw',
-      amount,
-      status: 'pending',
-      timestamp: timeStr,
-      description: `Withdrawal request of $${amount.toFixed(2)} to Address ${address.substring(0, 8)}... (Net after 10% fee)`,
-      withdrawalAddress: address
-    };
-
-    setUserBalance(prev => prev - amount);
-    setTransactions(prev => [withdrawTx, ...prev]);
+  const handleWithdrawSubmit = async (amount: number, address: string, network: 'trc20' | 'bep20') => {
+    await mutateUserOnServer('withdraw_submit', { amount, address, network });
   };
 
   if (isAdminView) {

@@ -5,10 +5,30 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
+import { Firestore } from '@google-cloud/firestore';
+
 dotenv.config();
+
+let db: Firestore | null = null;
+try {
+  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    db = new Firestore({
+      projectId: config.projectId,
+      databaseId: config.firestoreDatabaseId
+    });
+    console.log(`[Firestore] Initialized securely targeting DB ${config.firestoreDatabaseId} in project ${config.projectId}`);
+  } else {
+    console.warn("[Firestore] No firebase-applet-config.json found. Falling back to local file storage.");
+  }
+} catch (e) {
+  console.error("[Firestore] Failed to initialize Firestore:", e);
+}
 
 const app = express();
 const PORT = 3000;
+
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -75,7 +95,13 @@ const DEFAULT_SETTINGS = {
     level2: 5,
     level3: 2
   },
-  publicUrl: "https://h5latigo-music.ai.studio"
+  publicUrl: "https://h5latigo-music.ai.studio",
+  vipPlans: [
+    { level: 1, name: "VIP 1", minDeposit: 50, dailyRate: 0.026, dailyTasksLimit: 20, description: "Daily income 2.6%. Every day buy tickets and earn compound profit." },
+    { level: 2, name: "VIP 2", minDeposit: 500, dailyRate: 0.027, dailyTasksLimit: 30, description: "Daily income 2.7%. Every day buy tickets and earn compound profit." },
+    { level: 3, name: "VIP 3", minDeposit: 2000, dailyRate: 0.030, dailyTasksLimit: 40, description: "Daily income 3.0%. Every day buy music tickets and earn compound profit." },
+    { level: 4, name: "VIP 4", minDeposit: 4000, dailyRate: 0.035, dailyTasksLimit: 50, description: "Daily income 3.5%. Everyday buy music tickets and earn compound profit." }
+  ]
 };
 
 const DEFAULT_ACCOUNTS = [
@@ -108,7 +134,7 @@ const DEFAULT_ACCOUNTS = [
   { username: 'spammer_account', phone: '+12125550112', password: 'spam', balance: 0.00, vipLevel: 1, registrationDate: '2026-04-05 14:10', isBanned: true, referralCodeOwned: 'SPAM1', completedTasks: 0, transactions: [], hasClaimedWelfare: false }
 ];
 
-function getSettings() {
+function getLocalSettings() {
   if (fs.existsSync(SETTINGS_FILE)) {
     try {
       const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
@@ -120,6 +146,10 @@ function getSettings() {
       }
       if (parsed.bep20Address === "0x8922LatigoMusicOfficialBEP20AddressUSDT777") {
         parsed.bep20Address = DEFAULT_SETTINGS.bep20Address;
+        updated = true;
+      }
+      if (!parsed.vipPlans) {
+        parsed.vipPlans = DEFAULT_SETTINGS.vipPlans;
         updated = true;
       }
       if (updated) {
@@ -134,15 +164,53 @@ function getSettings() {
   return DEFAULT_SETTINGS;
 }
 
-function saveSettings(settings: any) {
+async function getSettings() {
+  if (!db) {
+    return getLocalSettings();
+  }
+  try {
+    const doc = await db.collection('settings').doc('global').get();
+    if (!doc.exists) {
+      console.log("[Firestore] Global settings not found, seeding default settings.");
+      const settings = getLocalSettings();
+      await db.collection('settings').doc('global').set(settings);
+      return settings;
+    }
+    const parsed = doc.data();
+    let updated = false;
+    if (parsed.trc20Address === "TMLatigoMusicOfficialTRC20AddressXYZ777") {
+      parsed.trc20Address = DEFAULT_SETTINGS.trc20Address;
+      updated = true;
+    }
+    if (parsed.bep20Address === "0x8922LatigoMusicOfficialBEP20AddressUSDT777") {
+      parsed.bep20Address = DEFAULT_SETTINGS.bep20Address;
+      updated = true;
+    }
+    if (!parsed.vipPlans) {
+      parsed.vipPlans = DEFAULT_SETTINGS.vipPlans;
+      updated = true;
+    }
+    if (updated) {
+      await db.collection('settings').doc('global').set(parsed);
+    }
+    return parsed;
+  } catch (err) {
+    console.error("[Firestore] Error reading settings from firestore:", err);
+    return getLocalSettings();
+  }
+}
+
+async function saveSettings(settings: any) {
   let current;
   try {
-    current = fs.existsSync(SETTINGS_FILE) ? JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')) : DEFAULT_SETTINGS;
+    current = db ? (await db.collection('settings').doc('global').get()).data() : null;
   } catch (e) {
-    current = DEFAULT_SETTINGS;
+    // ignore
+  }
+  if (!current) {
+    current = getLocalSettings();
   }
   
-  // Protect Deposit Wallet addresses: if incoming values are empty, invalid, or undefined, preserve existing ones.
   const trc = settings?.trc20Address;
   const bep = settings?.bep20Address;
   
@@ -153,9 +221,18 @@ function saveSettings(settings: any) {
   };
 
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(finalizedSettings, null, 2), 'utf-8');
+
+  if (db) {
+    try {
+      await db.collection('settings').doc('global').set(finalizedSettings);
+      console.log("[Firestore] Successfully saved settings.");
+    } catch (err) {
+      console.error("[Firestore] Error saving settings to Firestore:", err);
+    }
+  }
 }
 
-function getAccounts() {
+function getLocalAccounts() {
   if (fs.existsSync(ACCOUNTS_FILE)) {
     try {
       const data = fs.readFileSync(ACCOUNTS_FILE, 'utf-8');
@@ -202,8 +279,171 @@ function getAccounts() {
   return defaults;
 }
 
-function saveAccounts(accounts: any[]) {
+function sanitizeForFirestore(obj: any): any {
+  if (obj === null || obj === undefined) {
+    return null;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeForFirestore(item));
+  }
+  if (typeof obj === 'object') {
+    const clean: any = {};
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (val !== undefined) {
+        clean[key] = sanitizeForFirestore(val);
+      }
+    }
+    return clean;
+  }
+  return obj;
+}
+
+async function runDatabaseAuditAndRestore() {
+  if (!db) {
+    console.log("[Audit] Firestore database is not initialized. Skipping self-repair audit.");
+    return;
+  }
+  try {
+    console.log("[Audit] Initiating comprehensive database integrity self-repair audit...");
+    const snapshot = await db.collection('accounts').get();
+    if (snapshot.empty) {
+      console.log("[Audit] No accounts found to audit.");
+      return;
+    }
+    
+    let restoredCount = 0;
+    
+    for (const doc of snapshot.docs) {
+      const user = doc.data() as any;
+      const username = user.username;
+      if (!username) continue;
+      
+      const transactions = user.transactions || [];
+      
+      // Calculate correct balance based on transactions
+      let calculatedBalance = 0;
+      let hasTransactions = false;
+      
+      for (const tx of transactions) {
+        if (!tx.amount || !tx.status) continue;
+        const amount = Number(tx.amount);
+        if (isNaN(amount)) continue;
+        
+        if (tx.type === 'recharge' && tx.status === 'passed') {
+          calculatedBalance += amount;
+          hasTransactions = true;
+        } else if (tx.type === 'withdraw' && (tx.status === 'passed' || tx.status === 'pending')) {
+          calculatedBalance -= amount;
+          hasTransactions = true;
+        } else if (tx.type === 'vip_upgrade' && tx.status === 'passed') {
+          calculatedBalance -= amount;
+          hasTransactions = true;
+        } else if (tx.type === 'task_commission' && tx.status === 'passed') {
+          calculatedBalance += amount;
+          hasTransactions = true;
+        } else if (tx.type === 'referral_commission' && tx.status === 'passed') {
+          calculatedBalance += amount;
+          hasTransactions = true;
+        } else if (tx.type === 'welfare_bonus' && tx.status === 'passed') {
+          calculatedBalance += amount;
+          hasTransactions = true;
+        }
+      }
+      
+      calculatedBalance = Number(calculatedBalance.toFixed(4));
+      
+      if (calculatedBalance > 0 && user.balance === 0) {
+        console.log(`[Audit] CRITICAL: Identified zeroed account for user: "${username}". Database balance: 0. Calculated expected balance: $${calculatedBalance}. Restoring account balance...`);
+        user.balance = calculatedBalance;
+        user.investmentBalance = calculatedBalance;
+        
+        await db.collection('accounts').doc(username.toLowerCase()).set(sanitizeForFirestore(user));
+        console.log(`[Audit] Success: Restored balance and investmentBalance to $${calculatedBalance} for "${username}" in Firestore.`);
+        restoredCount++;
+      } else {
+        // Even if they are not 0, make sure investmentBalance is kept in sync with balance for compound growth
+        if (user.investmentBalance !== user.balance) {
+          console.log(`[Audit] Aligning investmentBalance (${user.investmentBalance}) with balance (${user.balance}) for user: "${username}"`);
+          user.investmentBalance = user.balance;
+          await db.collection('accounts').doc(username.toLowerCase()).set(sanitizeForFirestore(user));
+        }
+      }
+    }
+    
+    console.log(`[Audit] Self-repair audit completed successfully. Total accounts restored: ${restoredCount}`);
+  } catch (err) {
+    console.error("[Audit] Error during self-repair database audit:", err);
+  }
+}
+
+// Trigger audit asynchronously on startup
+setTimeout(() => {
+  runDatabaseAuditAndRestore().catch(err => {
+    console.error("[Audit] Startup database audit crashed:", err);
+  });
+}, 2000);
+
+async function getAccounts() {
+  if (!db) {
+    return getLocalAccounts();
+  }
+  try {
+    const snapshot = await db.collection('accounts').get();
+    if (snapshot.empty) {
+      console.log("[Firestore] No accounts found, seeding defaults.");
+      const defaults = getLocalAccounts();
+      const batch = db.batch();
+      for (const acc of defaults) {
+        const docRef = db.collection('accounts').doc(acc.username.toLowerCase());
+        batch.set(docRef, sanitizeForFirestore(acc));
+      }
+      await batch.commit();
+      return defaults;
+    }
+    const accounts: any[] = [];
+    snapshot.forEach((doc: any) => {
+      const acc = doc.data();
+      const v = acc.vipLevel !== undefined ? Number(acc.vipLevel) : (acc.vip !== undefined ? Number(acc.vip) : 1);
+      const txs = acc.transactions || [];
+      accounts.push({
+        ...acc,
+        vipLevel: v,
+        vip: v,
+        transactions: txs,
+        investmentBalance: acc.investmentBalance !== undefined ? Number(acc.investmentBalance) : Number(acc.balance || 0)
+      });
+    });
+    return accounts;
+  } catch (err) {
+    console.error("[Firestore] Error reading accounts from database:", err);
+    throw err; // Stop and propagate error to prevent empty/stale default fallbacks
+  }
+}
+
+async function saveAccounts(accounts: any[]) {
+  // Always save locally as backup/cache
   fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2), 'utf-8');
+
+  if (!db) return;
+
+  try {
+    // Save in chunks of 400 to be safely under the 500 batch limit
+    const chunkSize = 400;
+    for (let i = 0; i < accounts.length; i += chunkSize) {
+      const chunk = accounts.slice(i, i + chunkSize);
+      const batch = db.batch();
+      for (const acc of chunk) {
+        const docRef = db.collection('accounts').doc(acc.username.toLowerCase());
+        batch.set(docRef, sanitizeForFirestore(acc));
+      }
+      await batch.commit();
+    }
+    console.log(`[Firestore] Successfully saved/merged ${accounts.length} accounts.`);
+  } catch (err) {
+    console.error("[Firestore] Error saving accounts:", err);
+    throw err; // Rethrow to let API routes return proper 500 errors
+  }
 }
 
 // API Routes
@@ -305,47 +545,28 @@ app.post('/api/verify-code', (req, res) => {
   }
 });
 
-app.get('/api/settings', (req, res) => {
+app.get('/api/settings', async (req, res) => {
   try {
-    const settings = getSettings();
+    const settings = await getSettings();
     res.json(settings);
   } catch (error) {
     res.status(500).json({ error: "Failed to read site settings" });
   }
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', async (req, res) => {
   try {
     const settings = req.body;
-    saveSettings(settings);
+    await saveSettings(settings);
     res.json(settings);
   } catch (error) {
     res.status(500).json({ error: "Failed to save site settings" });
   }
 });
-app.post('/api/login', (req, res) => {
+
+app.get('/api/accounts', async (req, res) => {
   try {
-    const { username, password } = req.body;
-    const accounts = getAccounts();
-
-    const user = accounts.find((a: any) =>
-      (a.username.toLowerCase() === String(username).toLowerCase() ||
-      a.phone === username) &&
-      a.password === password
-    );
-
-    if (!user) {
-      return res.status(401).json({ error: "Invalid username or password" });
-    }
-
-    res.json({ success: true, user });
-  } catch (error) {
-    res.status(500).json({ error: "Login failed" });
-  }
-});
-app.get('/api/accounts', (req, res) => {
-  try {
-    const accounts = getAccounts();
+    const accounts = await getAccounts();
     const isAdmin = req.query.admin === 'true';
     const clientUser = req.query.username ? String(req.query.username).toLowerCase() : null;
 
@@ -356,7 +577,7 @@ app.get('/api/accounts', (req, res) => {
 
     // Sanitize for client view to protect user privacy and enforce data isolation
     const sanitized = accounts.map((acc: any) => {
-      const isMe = clientUser && acc.username.toLowerCase() === clientUser;
+      const isMe = clientUser && (acc.username.toLowerCase() === clientUser || (acc.phone && acc.phone.trim() === clientUser));
       
       if (isMe) {
         // Logged-in user gets their own full details
@@ -394,7 +615,7 @@ app.get('/api/accounts', (req, res) => {
   }
 });
 
-function validateAndProcessAccounts(incomingAccounts: any[], currentAccounts: any[], isAdmin: boolean, settings: any, targetUsername: string | null = null) {
+async function validateAndProcessAccounts(incomingAccounts: any[], currentAccounts: any[], isAdmin: boolean, settings: any, targetUsername: string | null = null) {
   const welfareLimit = settings?.welfareReward !== undefined ? Number(settings.welfareReward) : 1.50;
   const regBonus = settings?.registrationBonus !== undefined ? Number(settings.registrationBonus) : 0.00;
 
@@ -403,19 +624,40 @@ function validateAndProcessAccounts(incomingAccounts: any[], currentAccounts: an
 
   if (isAdmin) {
     // Admin has full control, update existing or insert new ones.
-    
-    // Accounts are never deleted just because they are missing from a sync list.
-for (const incomingAcc of incomingAccounts) {
-     
+    for (const incomingAcc of incomingAccounts) {
+      // If a specific targetUsername is being edited/approved, only update that user and skip all others
+      // to completely prevent stale admin-panel caches from overwriting newer server-side states.
+      if (targetUsername && incomingAcc.username.toLowerCase() !== targetUsername.toLowerCase()) {
+        continue;
+      }
       const idx = resultAccounts.findIndex(a => a.username.toLowerCase() === incomingAcc.username.toLowerCase());
       const v = incomingAcc.vipLevel !== undefined ? Number(incomingAcc.vipLevel) : (incomingAcc.vip !== undefined ? Number(incomingAcc.vip) : 1);
       if (idx !== -1) {
+        // Protect final transaction statuses (passed/cancelled) from being reverted to pending,
+        // even if incoming admin data is stale due to polling/sync delays.
+        const oldTxs = resultAccounts[idx].transactions || [];
+        const incomingTxs = incomingAcc.transactions || [];
+        const protectedTxs = incomingTxs.map((incTx: any) => {
+          const oldTx = oldTxs.find((t: any) => t.id === incTx.id);
+          if (oldTx && (oldTx.status === 'passed' || oldTx.status === 'cancelled')) {
+            if (incTx.status === 'pending') {
+              console.warn(`[Sync-Admin] Safely preserved final status of ${incTx.id} as ${oldTx.status} (prevented reversion to pending)`);
+              return { ...incTx, status: oldTx.status };
+            }
+          }
+          return incTx;
+        });
+
         resultAccounts[idx] = {
           ...resultAccounts[idx],
           ...incomingAcc,
+          password: incomingAcc.password || resultAccounts[idx].password,
+          securityQuestion: incomingAcc.securityQuestion || resultAccounts[idx].securityQuestion,
+          securityAnswer: incomingAcc.securityAnswer || resultAccounts[idx].securityAnswer,
           vipLevel: v,
           vip: v,
-          investmentBalance: incomingAcc.investmentBalance !== undefined ? Number(incomingAcc.investmentBalance) : Number(incomingAcc.balance || 0)
+          investmentBalance: incomingAcc.investmentBalance !== undefined ? Number(incomingAcc.investmentBalance) : Number(incomingAcc.balance || 0),
+          transactions: protectedTxs
         };
       } else {
         resultAccounts.push({
@@ -437,7 +679,30 @@ for (const incomingAcc of incomingAccounts) {
       continue;
     }
 
-    const idx = resultAccounts.findIndex(a => a.username.toLowerCase() === incomingAcc.username.toLowerCase());
+    let idx = resultAccounts.findIndex(a => a.username.toLowerCase() === incomingAcc.username.toLowerCase());
+    
+    if (idx === -1 && db) {
+      try {
+        const doc = await db.collection('accounts').doc(incomingAcc.username.toLowerCase()).get();
+        if (doc.exists) {
+          const dbAcc = doc.data() as any;
+          const v = dbAcc.vipLevel !== undefined ? Number(dbAcc.vipLevel) : (dbAcc.vip !== undefined ? Number(dbAcc.vip) : 1);
+          const dbAccNormalized = {
+            ...dbAcc,
+            vipLevel: v,
+            vip: v,
+            transactions: dbAcc.transactions || [],
+            investmentBalance: dbAcc.investmentBalance !== undefined ? Number(dbAcc.investmentBalance) : Number(dbAcc.balance || 0)
+          };
+          resultAccounts.push(dbAccNormalized);
+          idx = resultAccounts.length - 1;
+          console.log(`[Sync-DirectCheck] Recovered user ${incomingAcc.username} directly from Firestore. Prevented brand-new registration overwrite.`);
+        }
+      } catch (err) {
+        console.error(`[Sync-DirectCheck] Direct document fetch failed during sync for ${incomingAcc.username}:`, err);
+        throw new Error(`Database connection failed while validating account "${incomingAcc.username}". Sync aborted to protect user balance.`);
+      }
+    }
     
     if (idx === -1) {
       // New account registration
@@ -480,18 +745,15 @@ for (const incomingAcc of incomingAccounts) {
       let finalBalance = oldAcc.balance;
       let finalVipLevel = oldAcc.vipLevel;
       const todayStr = new Date().toISOString().substring(0, 10);
-      let finalCompletedTasks = incomingAcc.completedTasks;
-      let finalHasClaimedWelfare = incomingAcc.hasClaimedWelfare;
-      let finalLastProfitPayoutDate = incomingAcc.lastProfitPayoutDate;
+      let finalLastProfitPayoutDate = oldAcc.lastProfitPayoutDate || incomingAcc.lastProfitPayoutDate || todayStr;
+      let finalCompletedTasks = oldAcc.completedTasks !== undefined ? oldAcc.completedTasks : (incomingAcc.completedTasks || 0);
+      let finalHasClaimedWelfare = oldAcc.hasClaimedWelfare !== undefined ? oldAcc.hasClaimedWelfare : (incomingAcc.hasClaimedWelfare || false);
       if (finalLastProfitPayoutDate !== todayStr) {
         finalHasClaimedWelfare = false;
         finalLastProfitPayoutDate = todayStr;
         finalCompletedTasks = 0;
       }
-      let finalInvestmentBalance = oldAcc.investmentBalance !== undefined ? oldAcc.investmentBalance : oldAcc.balance;
-      if (incomingAcc.investmentBalance !== undefined) {
-        finalInvestmentBalance = incomingAcc.investmentBalance;
-      }
+      let finalInvestmentBalance = oldAcc.investmentBalance !== undefined ? Number(oldAcc.investmentBalance) : finalBalance;
 
       const oldTxIds = new Set((oldAcc.transactions || []).map((t: any) => t.id));
       const oldTxs = oldAcc.transactions || [];
@@ -506,6 +768,12 @@ for (const incomingAcc of incomingAccounts) {
         if (!incTx) return oldTx;
 
         if (oldTx.status !== incTx.status) {
+          // Rule 1: Once a transaction is finalized (passed or cancelled), it can never revert or change
+          if (oldTx.status === 'passed' || oldTx.status === 'cancelled') {
+            console.warn(`[Security] Non-admin tried to transition finalized transaction ${oldTx.id} from ${oldTx.status} to ${incTx.status}`);
+            return oldTx;
+          }
+          // Rule 2: Non-admin can never modify any recharge/withdrawal status
           if (oldTx.type === 'recharge' || oldTx.type === 'withdraw') {
             console.warn(`[Security] Non-admin tried to transition transaction ${oldTx.id} from ${oldTx.status} to ${incTx.status}`);
             return oldTx;
@@ -599,7 +867,7 @@ for (const incomingAcc of incomingAccounts) {
         phone: incomingAcc.phone || oldAcc.phone,
         referralCodeOwned: incomingAcc.referralCodeOwned || oldAcc.referralCodeOwned,
         balance: Number(finalBalance.toFixed(4)),
-        investmentBalance: Number(finalInvestmentBalance),
+        investmentBalance: Number(finalBalance.toFixed(4)),
         vipLevel: finalVipLevel,
         vip: finalVipLevel,
         isBanned,
@@ -614,17 +882,315 @@ for (const incomingAcc of incomingAccounts) {
   return resultAccounts;
 }
 
-app.post('/api/accounts', (req, res) => {
+app.post('/api/accounts/mutate', async (req, res) => {
+  try {
+    const { username, action, payload } = req.body;
+    if (!username || !action) {
+      return res.status(400).json({ error: "Username and action are required." });
+    }
+
+    // Load current accounts and retrieve direct doc from Firestore for absolute fresher/atomic accuracy (bypassing any read-lag)
+    const currentAccounts = await getAccounts();
+    const userIdx = currentAccounts.findIndex(a => a.username.toLowerCase() === username.toLowerCase());
+    if (userIdx === -1) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    let user: any = null;
+    if (db) {
+      try {
+        const doc = await db.collection('accounts').doc(username.toLowerCase()).get();
+        if (doc.exists) {
+          user = doc.data();
+          // Keep currentAccounts cache array in sync with direct Firestore document
+          currentAccounts[userIdx] = user;
+          console.log(`[Firestore-Mutate] Retrieved absolute freshest state direct-doc for user: ${username}`);
+        }
+      } catch (err) {
+        console.error("[Firestore-Mutate] Direct document fetch failed, falling back to cache list", err);
+      }
+    }
+
+    if (!user) {
+      user = { ...currentAccounts[userIdx] };
+    }
+
+    if (user.isBanned) {
+      return res.status(403).json({ error: "Your account is temporarily suspended." });
+    }
+
+    const todayStr = new Date().toISOString().substring(0, 10);
+    const now = new Date();
+    const timeStr = now.toISOString().replace('T', ' ').substring(0, 16);
+
+    // Normalize payout state first (same daily reset logic as in validateAndProcessAccounts)
+    if (user.lastProfitPayoutDate !== todayStr) {
+      user.hasClaimedWelfare = false;
+      user.lastProfitPayoutDate = todayStr;
+      user.completedTasks = 0;
+    }
+
+    if (action === 'complete_task') {
+      const { earnings, songTitle } = payload || {};
+      if (!songTitle || earnings === undefined) {
+        return res.status(400).json({ error: "Invalid task earnings or song title." });
+      }
+      
+      const vLevel = user.vipLevel !== undefined ? Number(user.vipLevel) : 1;
+      const invest = user.investmentBalance !== undefined ? Number(user.investmentBalance) : Number(user.balance || 0);
+      
+      if (vLevel < 1) {
+        return res.status(400).json({ error: "You must have at least VIP 1 active to receive daily earnings." });
+      }
+      if (invest < 50) {
+        return res.status(400).json({ error: "Your active investment is below $50. Please recharge to earn daily profits." });
+      }
+
+      // Max daily task limit check loaded dynamically from settings
+      const settings = await getSettings();
+      const vipPlans = settings?.vipPlans || DEFAULT_SETTINGS.vipPlans;
+      const currentPlan = vipPlans.find((p: any) => p.level === vLevel);
+      const maxTasks = currentPlan ? currentPlan.dailyTasksLimit : 20;
+
+      if (user.completedTasks >= maxTasks) {
+        return res.status(400).json({ error: "You have already reached your daily ticket limit." });
+      }
+
+      user.completedTasks += 1;
+      user.balance = Number((user.balance + earnings).toFixed(4));
+      
+      const newTx = {
+        id: `TX-TICKET-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
+        type: 'task_commission',
+        amount: earnings,
+        status: 'passed',
+        timestamp: timeStr,
+        description: `Settled music ticket verification: "${songTitle}"`
+      };
+      user.transactions = [newTx, ...(user.transactions || [])];
+
+      // Distribute team commissions based on daily ticket profit: Level 1 (16%), Level 2 (8%), Level 3 (4%)
+      if (user.referralCodeUsed) {
+        // Find Level 1 Referrer
+        const refL1Idx = currentAccounts.findIndex(a => a.referralCodeOwned && a.referralCodeOwned.toLowerCase() === user.referralCodeUsed.toLowerCase());
+        if (refL1Idx !== -1) {
+          const referrerL1 = currentAccounts[refL1Idx];
+          const l1Comm = Number((earnings * 0.16).toFixed(4));
+          referrerL1.balance = Number((referrerL1.balance + l1Comm).toFixed(4));
+          const txL1 = {
+            id: `TX-REF-L1-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
+            type: 'referral_commission',
+            amount: l1Comm,
+            status: 'passed',
+            timestamp: timeStr,
+            description: `16% Level 1 referral commission from "${user.username}" ticket profit of $${earnings.toFixed(2)}`
+          };
+          referrerL1.transactions = [txL1, ...(referrerL1.transactions || [])];
+          
+          // Save Level 1 Referrer to Firestore
+          if (db) {
+            await db.collection('accounts').doc(referrerL1.username.toLowerCase()).set(sanitizeForFirestore(referrerL1));
+            console.log(`[Firestore-Commission] Credited Level 1 commission of $${l1Comm} to ${referrerL1.username}`);
+          }
+
+          // Find Level 2 Referrer
+          if (referrerL1.referralCodeUsed) {
+            const refL2Idx = currentAccounts.findIndex(a => a.referralCodeOwned && a.referralCodeOwned.toLowerCase() === referrerL1.referralCodeUsed.toLowerCase());
+            if (refL2Idx !== -1) {
+              const referrerL2 = currentAccounts[refL2Idx];
+              const l2Comm = Number((earnings * 0.08).toFixed(4));
+              referrerL2.balance = Number((referrerL2.balance + l2Comm).toFixed(4));
+              const txL2 = {
+                id: `TX-REF-L2-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
+                type: 'referral_commission',
+                amount: l2Comm,
+                status: 'passed',
+                timestamp: timeStr,
+                description: `8% Level 2 referral commission from "${user.username}" ticket profit of $${earnings.toFixed(2)}`
+              };
+              referrerL2.transactions = [txL2, ...(referrerL2.transactions || [])];
+              
+              // Save Level 2 Referrer to Firestore
+              if (db) {
+                await db.collection('accounts').doc(referrerL2.username.toLowerCase()).set(sanitizeForFirestore(referrerL2));
+                console.log(`[Firestore-Commission] Credited Level 2 commission of $${l2Comm} to ${referrerL2.username}`);
+              }
+
+              // Find Level 3 Referrer
+              if (referrerL2.referralCodeUsed) {
+                const refL3Idx = currentAccounts.findIndex(a => a.referralCodeOwned && a.referralCodeOwned.toLowerCase() === referrerL2.referralCodeUsed.toLowerCase());
+                if (refL3Idx !== -1) {
+                  const referrerL3 = currentAccounts[refL3Idx];
+                  const l3Comm = Number((earnings * 0.04).toFixed(4));
+                  referrerL3.balance = Number((referrerL3.balance + l3Comm).toFixed(4));
+                  const txL3 = {
+                    id: `TX-REF-L3-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
+                    type: 'referral_commission',
+                    amount: l3Comm,
+                    status: 'passed',
+                    timestamp: timeStr,
+                    description: `4% Level 3 referral commission from "${user.username}" ticket profit of $${earnings.toFixed(2)}`
+                  };
+                  referrerL3.transactions = [txL3, ...(referrerL3.transactions || [])];
+                  
+                  // Save Level 3 Referrer to Firestore
+                  if (db) {
+                    await db.collection('accounts').doc(referrerL3.username.toLowerCase()).set(sanitizeForFirestore(referrerL3));
+                    console.log(`[Firestore-Commission] Credited Level 3 commission of $${l3Comm} to ${referrerL3.username}`);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+    } else if (action === 'upgrade_vip') {
+      const { level, cost } = payload || {};
+      if (!level || !cost) {
+        return res.status(400).json({ error: "Missing level or cost for VIP upgrade." });
+      }
+
+      if (user.balance < cost) {
+        return res.status(400).json({ error: "Insufficient balance for VIP upgrade." });
+      }
+
+      user.balance = Number((user.balance - cost).toFixed(4));
+      user.vipLevel = level;
+      user.vip = level;
+      user.completedTasks = 0; // Reset daily tasks count upon upgrading
+
+      const newTx = {
+        id: `TX-UPGRADE-V${level}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
+        type: 'vip_upgrade',
+        amount: cost,
+        status: 'passed',
+        timestamp: timeStr,
+        description: `Upgraded membership status to elite VIP ${level}`
+      };
+      user.transactions = [newTx, ...(user.transactions || [])];
+
+    } else if (action === 'claim_welfare') {
+      const { bonus } = payload || {};
+      if (bonus === undefined) {
+        return res.status(400).json({ error: "Invalid welfare bonus amount." });
+      }
+
+      if (user.hasClaimedWelfare) {
+        return res.status(400).json({ error: "You have already claimed welfare today." });
+      }
+
+      user.hasClaimedWelfare = true;
+      user.balance = Number((user.balance + bonus).toFixed(4));
+
+      const newTx = {
+        id: `TX-WELFARE-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
+        type: 'welfare_bonus',
+        amount: bonus,
+        status: 'passed',
+        timestamp: timeStr,
+        description: 'Daily welfare attendance sign-in award settled'
+      };
+      user.transactions = [newTx, ...(user.transactions || [])];
+
+    } else if (action === 'recharge_submit') {
+      const { amount, txId, receiptName } = payload || {};
+      if (!amount || !txId) {
+        return res.status(400).json({ error: "Missing recharge amount or transaction hash ID." });
+      }
+
+      const txIdClean = txId.trim();
+      const newTx = {
+        id: `R${Math.floor(1000000000 + Math.random() * 9000000000)}`,
+        type: 'recharge',
+        amount: Number(amount),
+        status: 'pending',
+        timestamp: timeStr,
+        description: `Recharge TRC-20 USDT deposit (TXID: ${txIdClean.substring(0, 8)}...)`,
+        txId: txIdClean,
+        receiptName: receiptName || ''
+      };
+      user.transactions = [newTx, ...(user.transactions || [])];
+
+    } else if (action === 'withdraw_submit') {
+      const { amount, address, network } = payload || {};
+      if (!amount || !address) {
+        return res.status(400).json({ error: "Missing withdrawal amount or wallet address." });
+      }
+
+      const withdrawAmount = Number(amount);
+      if (user.balance < withdrawAmount) {
+        return res.status(400).json({ error: "Insufficient balance to initiate this withdrawal." });
+      }
+
+      user.balance = Number((user.balance - withdrawAmount).toFixed(4));
+
+      const netAmount = Number((withdrawAmount * 0.9).toFixed(4));
+      const networkLabel = (network || 'trc20').toUpperCase();
+      const newTx = {
+        id: `W${Math.floor(1000000000 + Math.random() * 9000000000)}`,
+        type: 'withdraw',
+        amount: withdrawAmount,
+        status: 'pending',
+        timestamp: timeStr,
+        description: `Withdrawal request of $${withdrawAmount.toFixed(2)} via ${networkLabel} to Address ${address.substring(0, 6)}... (Net after 10% fee: $${netAmount.toFixed(2)})`,
+        withdrawalAddress: address,
+        withdrawalNetwork: network || 'trc20'
+      };
+      user.transactions = [newTx, ...(user.transactions || [])];
+
+    } else {
+      return res.status(400).json({ error: "Unsupported mutation action." });
+    }
+
+    // Save back to the array and write to storage
+    user.investmentBalance = user.balance;
+    currentAccounts[userIdx] = user;
+
+    if (db) {
+      await db.collection('accounts').doc(username.toLowerCase()).set(sanitizeForFirestore(user));
+      console.log(`[Firestore] Successfully mutated and saved user document for: ${username}`);
+    }
+    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(currentAccounts, null, 2), 'utf-8');
+
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error("Mutation action failed:", err);
+    res.status(500).json({ error: "Failed to process mutation action." });
+  }
+});
+
+app.post('/api/accounts', async (req, res) => {
   try {
     const incomingAccounts = req.body;
     if (Array.isArray(incomingAccounts)) {
-      const currentAccounts = getAccounts();
-      const settings = getSettings();
+      const currentAccounts = await getAccounts();
+      const settings = await getSettings();
       const isAdmin = req.query.admin === 'true';
       const targetUsername = req.query.username ? String(req.query.username) : null;
 
-      const validatedAccounts = validateAndProcessAccounts(incomingAccounts, currentAccounts, isAdmin, settings, targetUsername);
-      saveAccounts(validatedAccounts);
+      if (!isAdmin && !targetUsername) {
+        return res.status(400).json({ error: "Missing required user context for synchronization." });
+      }
+
+      const validatedAccounts = await validateAndProcessAccounts(incomingAccounts, currentAccounts, isAdmin, settings, targetUsername);
+      
+      if (targetUsername) {
+        const updatedUser = validatedAccounts.find(a => a.username.toLowerCase() === targetUsername.toLowerCase());
+        if (updatedUser) {
+          // Atomically update only this user's document in Firestore
+          if (db) {
+            await db.collection('accounts').doc(targetUsername.toLowerCase()).set(sanitizeForFirestore(updatedUser));
+            console.log(`[Firestore] Atomically saved single user doc for: ${targetUsername} (Admin/User target)`);
+          }
+          // Also save the local json backup array
+          fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(validatedAccounts, null, 2), 'utf-8');
+        }
+      } else {
+        // Admin update or fallback: save all accounts
+        await saveAccounts(validatedAccounts);
+      }
+      
       res.json({ success: true, count: validatedAccounts.length });
     } else {
       res.status(400).json({ error: "Invalid accounts array" });
@@ -632,6 +1198,26 @@ app.post('/api/accounts', (req, res) => {
   } catch (error) {
     console.error("Failed to process accounts saving:", error);
     res.status(500).json({ error: "Failed to save accounts database" });
+  }
+});
+
+app.delete('/api/accounts/:username', async (req, res) => {
+  try {
+    const username = String(req.params.username).toLowerCase();
+    const currentAccounts = await getAccounts();
+    const remaining = currentAccounts.filter((a) => a.username.toLowerCase() !== username);
+    if (remaining.length === currentAccounts.length) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+    if (db) {
+      await db.collection('accounts').doc(username).delete();
+      console.log(`[Firestore] Successfully deleted document for user: ${username}`);
+    }
+    await saveAccounts(remaining);
+    res.json({ success: true, count: remaining.length });
+  } catch (error) {
+    console.error("Failed to delete account:", error);
+    res.status(500).json({ error: "Failed to delete account" });
   }
 });
 

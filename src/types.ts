@@ -8,6 +8,7 @@ export interface Transaction {
   txId?: string; // For recharge
   paymentMethod?: string;
   withdrawalAddress?: string;
+  withdrawalNetwork?: string;
 }
 
 export interface TeamMember {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   ShieldAlert, Landmark, Users, TrendingUp, CheckCircle, XCircle, 
   Settings, ArrowLeft, KeyRound, Eye, Edit3, DollarSign, Award, 
@@ -36,6 +36,13 @@ export default function AdminPanel({
   setTeamMembers,
   onClose,
 }: AdminPanelProps) {
+  // Lock to prevent polling from overwriting state during or after admin edits
+  const lastEditTimeRef = useRef<number>(0);
+  const touchEditTime = () => {
+    lastEditTimeRef.current = Date.now();
+    localStorage.setItem('latigo_last_admin_edit_time', Date.now().toString());
+  };
+
   // Theme state
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     return localStorage.getItem('latigo_admin_dark_mode') !== 'false';
@@ -214,6 +221,13 @@ export default function AdminPanel({
     }).catch(err => console.error("Sync settings to server failed", err));
   };
 
+  const syncVipPlansToServer = (updatedPlans: VIPLevel[]) => {
+    const currentSettingsStr = localStorage.getItem('latigo_site_settings');
+    let currentSettings = currentSettingsStr ? JSON.parse(currentSettingsStr) : { ...siteSettings };
+    currentSettings = { ...currentSettings, vipPlans: updatedPlans };
+    saveSiteSettings(currentSettings);
+  };
+
   // Load all accounts on mount with admin details and merge local cache (self-healing)
   const loadAccountsDatabase = () => {
     fetch('/api/accounts?admin=true')
@@ -251,19 +265,61 @@ export default function AdminPanel({
 
     // Set up safe polling for registrations/updates to appear immediately
     const pollInterval = setInterval(() => {
+      // Skip polling updates if the admin has edited or approved recently to avoid race conditions/reverts
+      if (Date.now() - lastEditTimeRef.current < 8000) {
+        return;
+      }
       fetch('/api/accounts?admin=true')
         .then(res => res.json())
         .then(data => {
+          // Double check inside the callback to ignore any slow in-flight responses that started before the latest admin edit
+          if (Date.now() - lastEditTimeRef.current < 8000) {
+            return;
+          }
           if (Array.isArray(data)) {
-            // Compare and merge with local state to preserve users across restarts
+            // Compare and merge with local state to preserve users and protect finalized statuses
             setRegisteredAccounts(prev => {
-              const merged = [...data];
-              prev.forEach((prevAcc: any) => {
+              const merged = data.map((serverAcc: any) => {
+                const prevAcc = (prev || []).find((p: any) => p.username.toLowerCase() === serverAcc.username.toLowerCase());
+                if (!prevAcc) return serverAcc;
+
+                const serverTxs = serverAcc.transactions || [];
+                const prevTxs = prevAcc.transactions || [];
+
+                const mergedTxs = serverTxs.map((sTx: any) => {
+                  const pTx = prevTxs.find((t: any) => t.id === sTx.id);
+                  // If local status is passed or cancelled but server is pending, preserve local status
+                  if (pTx && (pTx.status === 'passed' || pTx.status === 'cancelled') && sTx.status === 'pending') {
+                    console.log(`[Admin-Poll-Merge] Preserving local finalized status (${pTx.status}) for transaction ${sTx.id}`);
+                    return { ...sTx, status: pTx.status };
+                  }
+                  return sTx;
+                });
+
+                // Determine the correct balance: if we approved/rejected and altered balance locally, preserve that
+                let correctBalance = serverAcc.balance;
+                const hasLocalFinalization = prevTxs.some((pTx: any) => {
+                  const sTx = serverTxs.find((t: any) => t.id === pTx.id);
+                  return pTx.status !== 'pending' && (!sTx || sTx.status === 'pending');
+                });
+                if (hasLocalFinalization) {
+                  correctBalance = prevAcc.balance;
+                }
+
+                return {
+                  ...serverAcc,
+                  transactions: mergedTxs,
+                  balance: correctBalance
+                };
+              });
+
+              (prev || []).forEach((prevAcc: any) => {
                 const exists = merged.some((m: any) => m.username.toLowerCase() === prevAcc.username.toLowerCase());
                 if (!exists) {
                   merged.push(prevAcc);
                 }
               });
+
               if (JSON.stringify(prev) !== JSON.stringify(merged)) {
                 localStorage.setItem('latigo_accounts', JSON.stringify(merged));
                 return merged;
@@ -289,17 +345,34 @@ export default function AdminPanel({
     return () => clearInterval(pollInterval);
   }, []);
 
-  // Synchronize registeredAccounts changes to server
-  useEffect(() => {
-    if (registeredAccounts && registeredAccounts.length > 0) {
-      localStorage.setItem('latigo_accounts', JSON.stringify(registeredAccounts));
-      fetch('/api/accounts?admin=true', {
+  // Synchronize registeredAccounts changes to server explicitly on admin action
+  const syncAccountsToServer = (accountsList: any[], targetUsername?: string) => {
+    if (accountsList && accountsList.length > 0) {
+      localStorage.setItem('latigo_accounts', JSON.stringify(accountsList));
+      const url = targetUsername 
+        ? `/api/accounts?admin=true&username=${encodeURIComponent(targetUsername)}`
+        : '/api/accounts?admin=true';
+      fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registeredAccounts)
-      }).catch(err => console.error("Failed to sync registered accounts", err));
+        body: JSON.stringify(accountsList)
+      })
+      .then(async res => {
+        if (!res.ok) {
+          const text = await res.text();
+          console.error(`[Admin-Sync] Server returned error status: ${res.status} - ${text}`);
+          throw new Error(`Server returned ${res.status}`);
+        }
+        return res.json();
+      })
+      .then(data => {
+        console.log(`[Admin-Sync] Successfully synchronized ${data.count || accountsList.length} accounts to server.`, data);
+      })
+      .catch(err => {
+        console.error("[Admin-Sync] Failed to sync registered accounts:", err);
+      });
     }
-  }, [registeredAccounts]);
+  };
 
   // Save activity logs
   const logActivity = (action: string) => {
@@ -392,7 +465,9 @@ export default function AdminPanel({
     });
 
     localStorage.setItem('latigo_accounts', JSON.stringify(updated));
+    touchEditTime();
     setRegisteredAccounts(updated);
+    syncAccountsToServer(updated, selectedUser.username);
     
     // Also sync currently logged in user if match
     const currentLoggedIn = localStorage.getItem('latigo_logged_in_user');
@@ -418,8 +493,12 @@ export default function AdminPanel({
     if (!confirmDelete) return;
 
     const updated = registeredAccounts.filter(u => u.username.toLowerCase() !== username.toLowerCase());
+    touchEditTime();
     setRegisteredAccounts(updated);
     localStorage.setItem('latigo_accounts', JSON.stringify(updated));
+
+    fetch(`/api/accounts/${encodeURIComponent(username)}`, { method: 'DELETE' })
+      .catch(err => console.error('Failed to delete account on server', err));
 
     logActivity(`Admin manually deleted user account permanently: ${username}`);
     alert(`Account "${username}" was permanently deleted.`);
@@ -456,7 +535,9 @@ export default function AdminPanel({
     });
 
     localStorage.setItem('latigo_accounts', JSON.stringify(updated));
+    touchEditTime();
     setRegisteredAccounts(updated);
+    syncAccountsToServer(updated, selectedUser.username);
 
     // Sync logged in state
     const currentLoggedIn = localStorage.getItem('latigo_logged_in_user');
@@ -516,6 +597,7 @@ export default function AdminPanel({
     updatedPlans.sort((a, b) => a.level - b.level);
     localStorage.setItem('latigo_vip_plans', JSON.stringify(updatedPlans));
     setVipPlans(updatedPlans);
+    syncVipPlansToServer(updatedPlans);
     setEditingPlan(null);
     
     // Clear inputs
@@ -537,6 +619,7 @@ export default function AdminPanel({
     const filtered = vipPlans.filter(p => p.level !== lvl);
     localStorage.setItem('latigo_vip_plans', JSON.stringify(filtered));
     setVipPlans(filtered);
+    syncVipPlansToServer(filtered);
     logActivity(`Deleted VIP Level ${lvl} configuration.`);
   };
 
@@ -572,73 +655,12 @@ export default function AdminPanel({
       return acc;
     });
 
-    // Distribute multilevel referral commission
-    // 16% (Level 1), 8% (Level 2), and 4% (Level 3)
-    let finalAccounts = [...updatedAccounts];
-    const targetUser = finalAccounts.find(a => a.username.toLowerCase() === usernameAssociated.toLowerCase());
-    
-    if (targetUser && targetUser.referralCodeUsed) {
-      // Find Level 1 Referrer
-      const lv1Referrer = finalAccounts.find(a => a.referralCodeOwned && a.referralCodeOwned.toLowerCase() === targetUser.referralCodeUsed.toLowerCase());
-      if (lv1Referrer) {
-        const lv1Comm = Number((amount * 0.16).toFixed(4));
-        lv1Referrer.balance += lv1Comm;
-        lv1Referrer.transactions = [
-          {
-            id: `TX-REF-L1-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
-            type: 'referral_commission',
-            amount: lv1Comm,
-            status: 'passed',
-            timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-            description: `16% Level 1 referral commission from "${targetUser.username}" recharge of $${amount.toFixed(2)}`
-          },
-          ...(lv1Referrer.transactions || [])
-        ];
-        
-        // Find Level 2 Referrer
-        if (lv1Referrer.referralCodeUsed) {
-          const lv2Referrer = finalAccounts.find(a => a.referralCodeOwned && a.referralCodeOwned.toLowerCase() === lv1Referrer.referralCodeUsed.toLowerCase());
-          if (lv2Referrer) {
-            const lv2Comm = Number((amount * 0.08).toFixed(4));
-            lv2Referrer.balance += lv2Comm;
-            lv2Referrer.transactions = [
-              {
-                id: `TX-REF-L2-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
-                type: 'referral_commission',
-                amount: lv2Comm,
-                status: 'passed',
-                timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-                description: `8% Level 2 referral commission from "${targetUser.username}" recharge of $${amount.toFixed(2)}`
-              },
-              ...(lv2Referrer.transactions || [])
-            ];
-            
-            // Find Level 3 Referrer
-            if (lv2Referrer.referralCodeUsed) {
-              const lv3Referrer = finalAccounts.find(a => a.referralCodeOwned && a.referralCodeOwned.toLowerCase() === lv2Referrer.referralCodeUsed.toLowerCase());
-              if (lv3Referrer) {
-                const lv3Comm = Number((amount * 0.04).toFixed(4));
-                lv3Referrer.balance += lv3Comm;
-                lv3Referrer.transactions = [
-                  {
-                    id: `TX-REF-L3-${Math.random().toString(36).substring(2, 9).toUpperCase()}`,
-                    type: 'referral_commission',
-                    amount: lv3Comm,
-                    status: 'passed',
-                    timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16),
-                    description: `4% Level 3 referral commission from "${targetUser.username}" recharge of $${amount.toFixed(2)}`
-                  },
-                  ...(lv3Referrer.transactions || [])
-                ];
-              }
-            }
-          }
-        }
-      }
-    }
+    const finalAccounts = [...updatedAccounts];
 
     localStorage.setItem('latigo_accounts', JSON.stringify(finalAccounts));
+    touchEditTime();
     setRegisteredAccounts(finalAccounts);
+    syncAccountsToServer(finalAccounts, usernameAssociated);
 
     // Credit currently logged in state if match
     const loggedInNow = localStorage.getItem('latigo_logged_in_user') || '';
@@ -682,7 +704,9 @@ export default function AdminPanel({
       return acc;
     });
     localStorage.setItem('latigo_accounts', JSON.stringify(updatedAccounts));
+    touchEditTime();
     setRegisteredAccounts(updatedAccounts);
+    syncAccountsToServer(updatedAccounts, usernameAssociated);
 
     const loggedInNow = localStorage.getItem('latigo_logged_in_user') || '';
     if (loggedInNow.toLowerCase() === usernameAssociated.toLowerCase()) {
@@ -714,7 +738,9 @@ export default function AdminPanel({
       return acc;
     });
     localStorage.setItem('latigo_accounts', JSON.stringify(updatedAccounts));
+    touchEditTime();
     setRegisteredAccounts(updatedAccounts);
+    syncAccountsToServer(updatedAccounts, usernameAssociated);
 
     const loggedInNow = localStorage.getItem('latigo_logged_in_user') || '';
     if (loggedInNow.toLowerCase() === usernameAssociated.toLowerCase()) {
@@ -747,7 +773,9 @@ export default function AdminPanel({
       return acc;
     });
     localStorage.setItem('latigo_accounts', JSON.stringify(updatedAccounts));
+    touchEditTime();
     setRegisteredAccounts(updatedAccounts);
+    syncAccountsToServer(updatedAccounts, usernameAssociated);
 
     const loggedInNow = localStorage.getItem('latigo_logged_in_user') || '';
     if (loggedInNow.toLowerCase() === usernameAssociated.toLowerCase()) {
@@ -1982,7 +2010,12 @@ export default function AdminPanel({
                             <p className="text-sm font-black text-rose-400">${tx.amount.toFixed(2)}</p>
                             <p className="text-xs text-zinc-400">{tx.description}</p>
                             {tx.withdrawalAddress && (
-                              <p className="text-[10px] font-mono text-emerald-400">TARGET WALLET: {tx.withdrawalAddress}</p>
+                              <p className="text-[10px] font-mono text-emerald-400">
+                                TARGET WALLET: {tx.withdrawalAddress}
+                                <span className="ml-2 px-1.5 py-0.5 text-[8px] bg-zinc-800 text-zinc-300 font-extrabold rounded-md uppercase">
+                                  {tx.withdrawalNetwork ? tx.withdrawalNetwork.toUpperCase() : 'TRC20'}
+                                </span>
+                              </p>
                             )}
                           </div>
 
@@ -2019,6 +2052,7 @@ export default function AdminPanel({
                           <th className="p-3 font-bold uppercase">Amount</th>
                           <th className="p-3 font-bold uppercase">Status</th>
                           <th className="p-3 font-bold uppercase">Settled Time</th>
+                          <th className="p-3 font-bold uppercase">Network</th>
                           <th className="p-3 font-bold uppercase">USDT Wallet Address</th>
                         </tr>
                       </thead>
@@ -2036,6 +2070,7 @@ export default function AdminPanel({
                               )}
                             </td>
                             <td className="p-3 text-zinc-500 font-semibold">{tx.timestamp}</td>
+                            <td className="p-3 font-extrabold uppercase text-amber-500">{tx.withdrawalNetwork || 'TRC20'}</td>
                             <td className="p-3 font-mono text-zinc-500 truncate max-w-[150px]" title={tx.withdrawalAddress || 'N/A'}>
                               {tx.withdrawalAddress || 'N/A'}
                             </td>

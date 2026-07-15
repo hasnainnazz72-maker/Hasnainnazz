@@ -8,7 +8,7 @@ interface FinanceTabProps {
   userInvestmentBalance?: number;
   transactions: Transaction[];
   onRechargeSubmit: (amount: number, txId: string, receiptName?: string) => void;
-  onWithdrawSubmit: (amount: number, address: string) => void;
+  onWithdrawSubmit: (amount: number, address: string, network: 'trc20' | 'bep20') => void;
   siteSettings?: any;
 }
 
@@ -25,6 +25,7 @@ export default function FinanceTab({ userBalance, userInvestmentBalance, transac
   const [rechargeSuccess, setRechargeSuccess] = useState(false);
 
   // Withdraw state
+  const [withdrawNetwork, setWithdrawNetwork] = useState<'trc20' | 'bep20'>('trc20');
   const [withdrawAmount, setWithdrawAmount] = useState<string>('');
   const [withdrawAddress, setWithdrawAddress] = useState<string>('');
   const [withdrawSuccess, setWithdrawSuccess] = useState(false);
@@ -111,11 +112,19 @@ export default function FinanceTab({ userBalance, userInvestmentBalance, transac
       return;
     }
     if (!withdrawAddress.trim()) {
-      alert("Please enter a valid TRC-20 USDT Wallet Address or local withdrawal account.");
+      alert(`Please enter a valid ${withdrawNetwork === 'trc20' ? 'TRC-20' : 'BEP-20 (BSC)'} USDT Wallet Address.`);
+      return;
+    }
+    if (withdrawNetwork === 'bep20' && !withdrawAddress.trim().startsWith('0x')) {
+      alert("Please enter a valid BEP-20 USDT Wallet Address starting with '0x'.");
+      return;
+    }
+    if (withdrawNetwork === 'trc20' && !withdrawAddress.trim().startsWith('T')) {
+      alert("Please enter a valid TRC-20 USDT Wallet Address starting with 'T'.");
       return;
     }
 
-    onWithdrawSubmit(amountVal, withdrawAddress);
+    onWithdrawSubmit(amountVal, withdrawAddress, withdrawNetwork);
     setWithdrawSuccess(true);
     setTimeout(() => {
       setWithdrawSuccess(false);
@@ -372,6 +381,35 @@ export default function FinanceTab({ userBalance, userInvestmentBalance, transac
                   </div>
                 </div>
 
+                {/* Network Selection */}
+                <div className="space-y-1.5">
+                  <label className="text-xs text-zinc-400 font-semibold block">Select Blockchain Network</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawNetwork('trc20')}
+                      className={`py-2 px-3 rounded-xl text-xs font-black border transition-all ${
+                        withdrawNetwork === 'trc20'
+                          ? 'bg-emerald-500 text-black border-emerald-500'
+                          : 'bg-zinc-950 border-zinc-850 text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      USDT - TRC20
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawNetwork('bep20')}
+                      className={`py-2 px-3 rounded-xl text-xs font-black border transition-all ${
+                        withdrawNetwork === 'bep20'
+                          ? 'bg-emerald-500 text-black border-emerald-500'
+                          : 'bg-zinc-950 border-zinc-850 text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      USDT - BEP20 (BSC)
+                    </button>
+                  </div>
+                </div>
+
                 {/* Amount input */}
                 <div className="space-y-1.5">
                   <div className="flex justify-between items-center">
@@ -393,13 +431,13 @@ export default function FinanceTab({ userBalance, userInvestmentBalance, transac
 
                 {/* Address inputs */}
                 <div className="space-y-1.5">
-                  <label className="text-xs text-zinc-400 font-semibold">Receiving USDT TRC-20 Address / Withdrawal Account</label>
+                  <label className="text-xs text-zinc-400 font-semibold">Receiving USDT {withdrawNetwork === 'trc20' ? 'TRC-20' : 'BEP-20 (BSC)'} Address</label>
                   <input
                     type="text"
                     value={withdrawAddress}
                     onChange={(e) => setWithdrawAddress(e.target.value)}
                     className="w-full bg-zinc-950 border border-zinc-850 rounded-xl p-3 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
-                    placeholder="e.g. TYFpGfZ8LscF9..."
+                    placeholder={withdrawNetwork === 'trc20' ? 'e.g. TYFpGfZ8LscF9...' : 'e.g. 0xbd63907b714a667...'}
                     required
                   />
                 </div>

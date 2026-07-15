@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Secure catch-all default deny to prevent direct client access / scraping
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
